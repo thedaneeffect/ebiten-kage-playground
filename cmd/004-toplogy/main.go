@@ -3,13 +3,11 @@ package main
 import (
 	"bytes"
 	_ "embed"
-	"errors"
 	"flag"
 	"fmt"
 	"image"
 	"image/color"
 	_ "image/jpeg"
-	"io"
 	"log"
 	"math"
 	"math/rand/v2"
@@ -25,6 +23,7 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
@@ -64,7 +63,7 @@ func Fragment(dst vec4, src vec2, rgba vec4, custom vec4) vec4 {
 	// move back to atlas space
 	texel += src_origin
 	
-	return imageSrc0At(texel)
+	return imageSrc0At(texel) * rgba
 }
 `
 
@@ -76,6 +75,8 @@ var plane_obj []byte
 
 //go:embed topology_mask.png
 var topology_mask_png []byte
+
+const texture_size = 128
 
 func main() {
 	flag.Parse()
@@ -118,7 +119,6 @@ func main() {
 		panic(err)
 	}
 
-	const texture_size = 128
 	const texture_subdivisions = 32
 	const tile_size = texture_size / texture_subdivisions
 
@@ -233,28 +233,9 @@ type mesh_t struct {
 }
 
 type vertex struct {
-	pos vec4
-	uv  vec2
-}
-
-func interpolate_vec4(v1, v2, v3 vec4, f vec3) (result vec4) {
-	result = result.Add(v1.Mul(f.X()))
-	result = result.Add(v2.Mul(f.Y()))
-	result = result.Add(v3.Mul(f.Z()))
-	return
-}
-
-func interpolate_vec2(v1, v2, v3 vec2, f vec3) (result vec2) {
-	result = result.Add(v1.Mul(f.X()))
-	result = result.Add(v2.Mul(f.Y()))
-	result = result.Add(v3.Mul(f.Z()))
-	return
-}
-
-func interpolate_vertex(v1, v2, v3 vertex, f vec3) (result vertex) {
-	result.pos = interpolate_vec4(v1.pos, v2.pos, v3.pos, f)
-	result.uv = interpolate_vec2(v1.uv, v2.uv, v3.uv, f)
-	return
+	pos  vec4
+	rgba vec4
+	uv   vec2
 }
 
 type viewport struct {
@@ -271,7 +252,28 @@ func (g *game) Layout(outerWidth, outerHeight int) (int, int) {
 }
 
 func (g *game) Update() error {
+	if g.cycle == 0 {
+
+		g.context.cpu.texture = &cpu_texture{
+			texels: make([]uint32, texture_size*texture_size),
+			width:  texture_size,
+			height: texture_size,
+		}
+
+		g.texture.ReadPixels(
+			unsafe.Slice(
+				(*byte)(unsafe.Pointer(
+					&g.context.cpu.texture.texels[0],
+				)),
+				len(g.context.cpu.texture.texels)*4,
+			),
+		)
+	}
 	g.cycle++
+
+	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		g.context.use_cpu = !g.context.use_cpu
+	}
 
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		cx, cy := ebiten.CursorPosition()
@@ -322,81 +324,6 @@ func (g *game) Update() error {
 	return nil
 }
 
-type plane struct {
-	origin vec4
-	normal vec4
-}
-
-// test determines if `v` is in front of the plane.
-func (p plane) test(v vec4) bool {
-	return v.Sub(p.origin).Dot(p.normal) > 0
-}
-
-// intersection returns the point of contact of a line segment between a->b to our plane.
-func (p plane) intersection(a, b vec4) vec4 {
-	u := b.Sub(a)
-	w := a.Sub(p.origin)
-	d := p.normal.Dot(u)
-	n := -p.normal.Dot(w)
-	return a.Add(u.Mul(n / d))
-}
-
-var clip_planes = [...]plane{
-	{origin: vec4{1, 0, 0, 1}, normal: vec4{-1, 0, 0, 1}}, // right
-	{origin: vec4{-1, 0, 0, 1}, normal: vec4{1, 0, 0, 1}}, // left
-	{origin: vec4{0, 1, 0, 1}, normal: vec4{0, -1, 0, 1}}, // bottom
-	{origin: vec4{0, -1, 0, 1}, normal: vec4{0, 1, 0, 1}}, // top
-	{origin: vec4{0, 0, 1, 1}, normal: vec4{0, 0, -1, 1}}, // front
-	{origin: vec4{0, 0, -1, 1}, normal: vec4{0, 0, 1, 1}}, // back
-}
-
-var scratch1 = [9]vec4{} // 9 is a safe number to ensure we never
-var scratch2 = [9]vec4{} // run out of space while clipping
-
-// https://en.wikipedia.org/wiki/Sutherland-Hodgman_algorithm
-// thread-unsafe: scratch1, scratch2
-func sutherland_hodgman_3d(p1, p2, p3 vec4) []vec4 {
-	output := append(scratch2[:0], p1, p2, p3)
-	for _, plane := range clip_planes {
-		copy(scratch1[:], output)       // copy output polygon to our input
-		input := scratch1[:len(output)] //
-		output = scratch2[:0]           // clear our output polygon
-		if len(input) == 0 {
-			return nil
-		}
-		prev_point := input[len(input)-1]
-		for _, point := range input {
-			if plane.test(point) {
-				if !plane.test(prev_point) {
-					output = append(output, plane.intersection(prev_point, point))
-				}
-				output = append(output, point)
-			} else if plane.test(prev_point) {
-				output = append(output, plane.intersection(prev_point, point))
-			}
-			prev_point = point
-		}
-	}
-	return output
-}
-
-// https://en.wikipedia.org/wiki/Barycentric_coordinate_system
-func barycentric(p1, p2, p3, p vec3) vec3 {
-	v0 := p2.Sub(p1)
-	v1 := p3.Sub(p1)
-	v2 := p.Sub(p1)
-	d00 := v0.Dot(v0)
-	d01 := v0.Dot(v1)
-	d11 := v1.Dot(v1)
-	d20 := v2.Dot(v0)
-	d21 := v2.Dot(v1)
-	d := d00*d11 - d01*d01
-	v := (d11*d20 - d01*d21) / d
-	w := (d00*d21 - d01*d20) / d
-	u := 1 - v - w
-	return vec3{u, v, w}
-}
-
 type context struct {
 	shader      *ebiten.Shader
 	view_matrix mat4
@@ -415,14 +342,26 @@ type context struct {
 	vertices          []ebiten.Vertex
 	indices           []uint16
 
-	use_cpu        bool
-	cpu_buffer     *ebiten.Image
-	cpu_pixels     []uint32
-	cpu_pixels_raw []byte
+	use_cpu bool
+	cpu     cpu_context
 }
 
-func init() {
+type cpu_texture struct {
+	texels []uint32
+	width  int
+	height int
+}
 
+type cpu_context struct {
+	texture     *cpu_texture
+	buffer      *ebiten.Image
+	pixels      []uint32
+	depth       []float32
+	pixels_raw  []byte
+	width       int
+	height      int
+	left, right int
+	top, bottom int
 }
 
 type screen_triangle struct {
@@ -474,16 +413,19 @@ func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mes
 
 	for _, triangle := range mesh.triangles {
 		v1 := vertex{
-			pos: ctx.clip_space_points[triangle.v1],
-			uv:  mesh.uvs[triangle.t1],
+			pos:  ctx.clip_space_points[triangle.v1],
+			rgba: vec4{1, 0, 0, 1},
+			uv:   mesh.uvs[triangle.t1],
 		}
 		v2 := vertex{
-			pos: ctx.clip_space_points[triangle.v2],
-			uv:  mesh.uvs[triangle.t2],
+			pos:  ctx.clip_space_points[triangle.v2],
+			rgba: vec4{0, 1, 0, 1},
+			uv:   mesh.uvs[triangle.t2],
 		}
 		v3 := vertex{
-			pos: ctx.clip_space_points[triangle.v3],
-			uv:  mesh.uvs[triangle.t3],
+			pos:  ctx.clip_space_points[triangle.v3],
+			rgba: vec4{0, 0, 1, 1},
+			uv:   mesh.uvs[triangle.t3],
 		}
 
 		if out_of_bounds(v1.pos) || out_of_bounds(v2.pos) || out_of_bounds(v3.pos) {
@@ -533,8 +475,10 @@ func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mes
 
 			r1.DstX = v1.pos.X() * inv_w1
 			r1.DstY = v1.pos.Y() * inv_w1
+
 			r2.DstX = v2.pos.X() * inv_w2
 			r2.DstY = v2.pos.Y() * inv_w2
+
 			r3.DstX = v3.pos.X() * inv_w3
 			r3.DstY = v3.pos.Y() * inv_w3
 
@@ -552,24 +496,38 @@ func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mes
 			// ndc to screen space
 			r1.DstX = viewport_transform(r1.DstX, w_half)
 			r1.DstY = viewport_transform(r1.DstY, h_half)
+			r1.ColorR = t.v1.rgba.X()
+			r1.ColorG = t.v1.rgba.Y()
+			r1.ColorB = t.v1.rgba.Z()
+			r1.ColorA = t.v1.rgba.W()
+			r1.Custom3 = inv_w1
+
 			r2.DstX = viewport_transform(r2.DstX, w_half)
 			r2.DstY = viewport_transform(r2.DstY, h_half)
+			r2.ColorR = t.v2.rgba.X()
+			r2.ColorG = t.v2.rgba.Y()
+			r2.ColorB = t.v2.rgba.Z()
+			r2.ColorA = t.v2.rgba.W()
+			r2.Custom3 = inv_w2
+
 			r3.DstX = viewport_transform(r3.DstX, w_half)
 			r3.DstY = viewport_transform(r3.DstY, h_half)
+			r3.ColorR = t.v3.rgba.X()
+			r3.ColorG = t.v3.rgba.Y()
+			r3.ColorB = t.v3.rgba.Z()
+			r3.ColorA = t.v3.rgba.W()
+			r3.Custom3 = inv_w3
 
 			// perspective correction
 			if true {
 				r1.SrcX = v1.uv.X() * inv_w1
 				r1.SrcY = v1.uv.Y() * inv_w1
-				r1.Custom3 = inv_w1
 
 				r2.SrcX = v2.uv.X() * inv_w2
 				r2.SrcY = v2.uv.Y() * inv_w2
-				r2.Custom3 = inv_w2
 
 				r3.SrcX = v3.uv.X() * inv_w3
 				r3.SrcY = v3.uv.Y() * inv_w3
-				r3.Custom3 = inv_w3
 			} else {
 				r1.SrcX = v1.uv.X()
 				r1.SrcY = v1.uv.Y()
@@ -598,21 +556,13 @@ func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mes
 
 func (ctx *context) draw(texture, target *ebiten.Image) {
 	if ctx.use_cpu {
-		ctx.draw_cpu(texture, target)
+		ctx.cpu.draw(ctx.vertices, texture, target)
 	} else {
 		ctx.draw_gpu(texture, target)
 	}
-}
-
-func (ctx *context) draw_cpu(texture, target *ebiten.Image) {
-	dst_bounds := target.Bounds()
-	dst_size := dst_bounds.Dx() * dst_bounds.Dy()
-	if ctx.cpu_pixels == nil || len(ctx.cpu_pixels) != dst_size {
-		ctx.cpu_pixels = make([]uint32, dst_bounds.Dx()*dst_bounds.Dy())
-		ctx.cpu_pixels_raw = unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(ctx.cpu_pixels))), len(ctx.cpu_pixels)*4)
-	}
-
-	target.WritePixels(ctx.cpu_pixels_raw)
+	ctx.drawn_triangles = len(ctx.vertices) / 3
+	ctx.vertices = ctx.vertices[:0]
+	ctx.indices = ctx.indices[:0]
 }
 
 func (ctx *context) draw_gpu(texture, target *ebiten.Image) {
@@ -620,15 +570,8 @@ func (ctx *context) draw_gpu(texture, target *ebiten.Image) {
 		Images: [4]*ebiten.Image{
 			texture,
 		},
-		Uniforms: map[string]any{
-			"HoverID": 0,
-		},
 		AntiAlias: false,
 	})
-
-	ctx.drawn_triangles = len(ctx.indices) / 3
-	ctx.vertices = ctx.vertices[:0]
-	ctx.indices = ctx.indices[:0]
 }
 
 func (g *game) Draw(screen *ebiten.Image) {
@@ -667,13 +610,13 @@ func (g *game) Draw(screen *ebiten.Image) {
 
 	screen.Fill(color.RGBA{130, 130, 130, 255})
 
-	// position := vec3{0, 0, 0}
+	position := vec3{0, 0, 0}
 
 	orientation := mgl32.QuatIdent()
-	angle := g.cycle / 60 / math.Pi
-	orientation = orientation.Mul(mgl32.QuatRotate(angle, vec3{0, 1, 0}))
+	// angle := g.cycle / 60 / math.Pi
+	// orientation = orientation.Mul(mgl32.QuatRotate(angle, vec3{0, 1, 0}))
 
-	// hover_id := ctx.push_mesh(g.mesh, position, orientation, 0)
+	hover_id := ctx.push_mesh(g.mesh, position, orientation, 0)
 
 	ctx.draw(g.texture, screen)
 
@@ -683,88 +626,9 @@ func (g *game) Draw(screen *ebiten.Image) {
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("TPS: %.0f", ebiten.ActualTPS()), 0, 0)
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("FPS: %.0f CPU: %v", ebiten.ActualFPS(), g.context.use_cpu), 0, 14)
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Ft: %v", g.frametime), 0, 28)
-	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Mem: %d", mem.Alloc/1024), 0, 42)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Mem: %dkB", mem.Alloc/1024), 0, 42)
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Triangles: %d", ctx.drawn_triangles), 0, 56)
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Eye: %.2f, %.2f", g.camera.pitch, g.camera.yaw), 0, 70)
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Cam: %v", g.camera.pos), 0, 84)
-	// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("HoverID: %v", hover_id), 0, 98)
-}
-
-func load_obj(src []byte) (*mesh_t, error) {
-	reader := bytes.NewReader(src)
-	mesh := &mesh_t{}
-	for {
-		var typ string
-		if _, err := fmt.Fscan(reader, &typ); err != nil {
-			if errors.Is(io.EOF, err) {
-				break
-			}
-			return nil, fmt.Errorf("bad type: %w", err)
-		}
-		switch typ {
-		default:
-			return nil, fmt.Errorf("unknown type: %s", typ)
-		case "#", "o", "s", "l":
-			fmt.Fscanln(reader)
-		case "v":
-			var x, y, z float
-			if _, err := fmt.Fscanf(reader, "%f %f %f", &x, &y, &z); err != nil {
-				return nil, fmt.Errorf("bad vertex: %w", err)
-			}
-			mesh.points = append(mesh.points, vec3{x, y, z})
-		case "vt":
-			var s, t float
-			if _, err := fmt.Fscanf(reader, "%f %f", &s, &t); err != nil {
-				return nil, fmt.Errorf("bad texcoord: %w", err)
-			}
-			mesh.uvs = append(mesh.uvs, vec2{s, t})
-		case "f":
-			var v1, v2, v3 uint16
-			var t1, t2, t3 uint16
-			if _, err := fmt.Fscanf(reader, "%d/%d %d/%d %d/%d", &v1, &t1, &v2, &t2, &v3, &t3); err != nil {
-				return nil, fmt.Errorf("bad face: %w", err)
-			}
-			mesh.triangles = append(mesh.triangles, triangle{
-				v1: v1 - 1,
-				v2: v2 - 1,
-				v3: v3 - 1,
-				t1: t1 - 1,
-				t2: t2 - 1,
-				t3: t3 - 1,
-			})
-		}
-	}
-	return mesh, nil
-}
-
-func point_in_triangle_bounds(x, y, xA, yA, xB, yB, xC, yC float32) bool {
-	if (y < yA) && (y < yB) && (y < yC) {
-		return false
-	}
-	if (y > yA) && (y > yB) && (y > yC) {
-		return false
-	}
-	if (x < xA) && (x < xB) && (x < xC) {
-		return false
-	}
-	return (x <= xA) || (x <= xB) || (x <= xC)
-}
-
-func point_in_triangle(x, y, x1, y1, x2, y2, x3, y3 float32) bool {
-	v0x, v0y := x3-x1, y3-y1
-	v1x, v1y := x2-x1, y2-y1
-	v2x, v2y := x-x1, y-y1
-	dot00 := v0x*v0x + v0y*v0y
-	dot01 := v0x*v1x + v0y*v1y
-	dot02 := v0x*v2x + v0y*v2y
-	dot11 := v1x*v1x + v1y*v1y
-	dot12 := v1x*v2x + v1y*v2y
-	b := dot00*dot11 - dot01*dot01
-	var inv float32
-	if b != 0 {
-		inv = 1.0 / b
-	}
-	u := (dot11*dot02 - dot01*dot12) * inv
-	v := (dot00*dot12 - dot01*dot02) * inv
-	return u >= 0 && v >= 0 && (u+v < 1.0)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("HoverID: %v", hover_id), 0, 98)
 }
