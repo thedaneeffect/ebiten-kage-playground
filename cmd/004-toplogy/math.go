@@ -7,7 +7,7 @@ func interpolate_vec4(v1, v2, v3 vec4, f vec3) (result vec4) {
 	return
 }
 
-func interpolate_vec3_4(v1, v2, v3 vec4, f vec3) (result vec4) {
+func interpolate_pos(v1, v2, v3 vec4, f vec3) (result vec4) {
 	result = result.Add(v1.Mul(f.X()))
 	result = result.Add(v2.Mul(f.Y()))
 	result = result.Add(v3.Mul(f.Z()))
@@ -29,7 +29,7 @@ func interpolate_vec2(v1, v2, v3 vec2, f vec3) (result vec2) {
 }
 
 func interpolate_vertex(v1, v2, v3 vertex, f vec3) (result vertex) {
-	result.pos = interpolate_vec3_4(v1.pos, v2.pos, v3.pos, f)
+	result.pos = interpolate_pos(v1.pos, v2.pos, v3.pos, f)
 	result.rgba = interpolate_vec4(v1.rgba, v2.rgba, v3.rgba, f)
 	result.uv = interpolate_vec2(v1.uv, v2.uv, v3.uv, f)
 	return

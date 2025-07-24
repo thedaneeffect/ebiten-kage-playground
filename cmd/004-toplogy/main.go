@@ -20,7 +20,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 
-	"github.com/go-gl/mathgl/mgl32"
+	mgl "github.com/go-gl/mathgl/mgl32"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -28,18 +28,18 @@ import (
 )
 
 const (
-	game_width  = 800
-	game_height = 600
+	game_width  = 1024
+	game_height = 1024
 	game_aspect = float(game_width) / float(game_height)
 )
 
 type (
 	float = float32
-	vec2  = mgl32.Vec2
-	vec3  = mgl32.Vec3
-	vec4  = mgl32.Vec4
-	mat4  = mgl32.Mat4
-	quat  = mgl32.Quat
+	vec2  = mgl.Vec2
+	vec3  = mgl.Vec3
+	vec4  = mgl.Vec4
+	mat4  = mgl.Mat4
+	quat  = mgl.Quat
 )
 
 var shader = `
@@ -55,6 +55,7 @@ func Fragment(dst vec4, src vec2, rgba vec4, custom vec4) vec4 {
 	// perspective divide
 	if custom.w != 0.0 {
 		texel /= custom.w
+		rgba /= custom.w
 	}
 
 	// scale uv to pixels
@@ -70,7 +71,7 @@ func Fragment(dst vec4, src vec2, rgba vec4, custom vec4) vec4 {
 var cpu_profile = flag.String("cpuprofile", "", "write cpu profile to `file`")
 var mem_profile = flag.String("memprofile", "", "write memory profile to `file`")
 
-//go:embed plane.obj
+//go:embed plane3.obj
 var plane_obj []byte
 
 //go:embed topology_mask.png
@@ -119,7 +120,7 @@ func main() {
 		panic(err)
 	}
 
-	const texture_subdivisions = 32
+	const texture_subdivisions = 8
 	const tile_size = texture_size / texture_subdivisions
 
 	texture := ebiten.NewImage(texture_size, texture_size)
@@ -132,7 +133,7 @@ func main() {
 			}
 			x := float(col * tile_size)
 			y := float(row * tile_size)
-			vector.DrawFilledRect(texture, x, y, tile_size, tile_size, color.White, false)
+			vector.DrawFilledRect(texture, float32(x), float32(y), tile_size, tile_size, color.White, false)
 		}
 	}
 
@@ -144,7 +145,7 @@ func main() {
 	}
 
 	for i, p := range mesh.points {
-		mesh.points[i] = p.Add(vec3{0, 1 * rand.Float32(), 0})
+		mesh.points[i] = p.Add(vec3{0, float(3 * rand.Float32()), 0}).Mul(3)
 	}
 
 	game := &game{
@@ -156,7 +157,7 @@ func main() {
 		camera: camera{
 			pitch: 0.35,
 			yaw:   0,
-			pos:   vec3{0, 7, 19},
+			pos:   vec3{0, 32, 64},
 		},
 		context: &context{
 			shader: shader,
@@ -203,6 +204,7 @@ type game struct {
 	topology_scale     float64
 	frametime          time.Duration
 	camera             camera
+	move_speed         float
 }
 
 type camera struct {
@@ -275,6 +277,14 @@ func (g *game) Update() error {
 		g.context.use_cpu = !g.context.use_cpu
 	}
 
+	if _, yoff := ebiten.Wheel(); yoff != 0 {
+		g.move_speed += float(yoff) / 10.0
+	}
+
+	if g.move_speed < 0.1 {
+		g.move_speed = 0.1
+	}
+
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		cx, cy := ebiten.CursorPosition()
 
@@ -285,30 +295,30 @@ func (g *game) Update() error {
 			dx := float(cx-g.camera.drag_x) / 100.0
 			dy := float(cy-g.camera.drag_y) / 100.0
 
-			g.camera.pitch = mgl32.Clamp(g.camera.pitch+dy, -math.Pi/2, math.Pi/2)
-			g.camera.yaw -= dx
+			g.camera.pitch = mgl.Clamp(g.camera.pitch+dy, -math.Pi/2, math.Pi/2)
+			g.camera.yaw += dx
 
-			view := mgl32.Ident4()
-			view = view.Mul4(mgl32.HomogRotate3DX(g.camera.pitch))
-			view = view.Mul4(mgl32.HomogRotate3DY(g.camera.yaw))
+			view := mgl.Ident4()
+			view = view.Mul4(mgl.HomogRotate3DX(g.camera.pitch))
+			view = view.Mul4(mgl.HomogRotate3DY(g.camera.yaw))
 
-			g.camera.right = view.Row(0).Vec3().Mul(-1)
+			g.camera.right = view.Row(0).Vec3()
 			g.camera.up = view.Row(1).Vec3()
 			g.camera.forward = view.Row(2).Vec3().Mul(-1)
 
 			if ebiten.IsKeyPressed(ebiten.KeyW) || ebiten.IsKeyPressed(ebiten.KeyUp) {
-				g.camera.pos = g.camera.pos.Add(g.camera.forward.Mul(0.1))
+				g.camera.pos = g.camera.pos.Add(g.camera.forward.Mul(g.move_speed))
 			} else if ebiten.IsKeyPressed(ebiten.KeyS) || ebiten.IsKeyPressed(ebiten.KeyDown) {
-				g.camera.pos = g.camera.pos.Sub(g.camera.forward.Mul(0.1))
+				g.camera.pos = g.camera.pos.Sub(g.camera.forward.Mul(g.move_speed))
 			}
 
 			if ebiten.IsKeyPressed(ebiten.KeyD) || ebiten.IsKeyPressed(ebiten.KeyRight) {
-				g.camera.pos = g.camera.pos.Add(g.camera.right.Mul(0.1))
+				g.camera.pos = g.camera.pos.Add(g.camera.right.Mul(g.move_speed))
 			} else if ebiten.IsKeyPressed(ebiten.KeyA) || ebiten.IsKeyPressed(ebiten.KeyLeft) {
-				g.camera.pos = g.camera.pos.Sub(g.camera.right.Mul(0.1))
+				g.camera.pos = g.camera.pos.Sub(g.camera.right.Mul(g.move_speed))
 			}
 
-			g.camera.view_matrix = view.Mul4(mgl32.Translate3D(
+			g.camera.view_matrix = view.Mul4(mgl.Translate3D(
 				-g.camera.pos.X(),
 				-g.camera.pos.Y(),
 				-g.camera.pos.Z(),
@@ -356,7 +366,7 @@ type cpu_context struct {
 	texture     *cpu_texture
 	buffer      *ebiten.Image
 	pixels      []uint32
-	depth       []float32
+	depth       []float
 	pixels_raw  []byte
 	width       int
 	height      int
@@ -390,24 +400,23 @@ func viewport_transform(ndc, dimension_half float) float {
 func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mesh_data uint64) int {
 	// TODO: determine if mesh is culled
 
-	// save us some calculations by doing this here instead of per point
-	projection_view_matrix := ctx.proj_matrix.Mul4(
-		ctx.view_matrix.Mul4(
-			orientation.Mat4().Mul4(
-				mgl32.Translate3D(
-					position.X(),
-					position.Y(),
-					position.Z(),
-				),
-			),
+	model := orientation.Mat4().Mul4(
+		mgl.Translate3D(
+			position.X(),
+			position.Y(),
+			position.Z(),
 		),
 	)
+
+	// save us some calculations by doing this here instead of per point
+	project := ctx.proj_matrix
+	model_view_project := project.Mul4(ctx.view_matrix).Mul4(model)
 
 	// transform all the mesh points into clip space
 	for _, point := range mesh.points {
 		// TODO: perform local transformations here (skeleton?)
 
-		point := projection_view_matrix.Mul4x1(point.Vec4(1))
+		point := model_view_project.Mul4x1(point.Vec4(1))
 		ctx.clip_space_points = append(ctx.clip_space_points, point)
 	}
 
@@ -458,6 +467,7 @@ func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mes
 
 		w_half := float(ctx.viewport.w_half)
 		h_half := float(ctx.viewport.h_half)
+		h := float32(ctx.viewport.h)
 
 		var r1 ebiten.Vertex
 		var r2 ebiten.Vertex
@@ -473,14 +483,14 @@ func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mes
 			inv_w2 := 1.0 / v2.pos.W()
 			inv_w3 := 1.0 / v3.pos.W()
 
-			r1.DstX = v1.pos.X() * inv_w1
-			r1.DstY = v1.pos.Y() * inv_w1
+			r1.DstX = float32(v1.pos.X() * inv_w1)
+			r1.DstY = float32(v1.pos.Y() * inv_w1)
 
-			r2.DstX = v2.pos.X() * inv_w2
-			r2.DstY = v2.pos.Y() * inv_w2
+			r2.DstX = float32(v2.pos.X() * inv_w2)
+			r2.DstY = float32(v2.pos.Y() * inv_w2)
 
-			r3.DstX = v3.pos.X() * inv_w3
-			r3.DstY = v3.pos.Y() * inv_w3
+			r3.DstX = float32(v3.pos.X() * inv_w3)
+			r3.DstY = float32(v3.pos.Y() * inv_w3)
 
 			// 2d cross product
 			dx12 := (r2.DstX - r1.DstX)
@@ -494,47 +504,45 @@ func (ctx *context) push_mesh(mesh *mesh_t, position vec3, orientation quat, mes
 			}
 
 			// ndc to screen space
-			r1.DstX = viewport_transform(r1.DstX, w_half)
-			r1.DstY = viewport_transform(r1.DstY, h_half)
-			r1.ColorR = t.v1.rgba.X()
-			r1.ColorG = t.v1.rgba.Y()
-			r1.ColorB = t.v1.rgba.Z()
-			r1.ColorA = t.v1.rgba.W()
-			r1.Custom3 = inv_w1
+			r1.DstX = float32(viewport_transform(float(r1.DstX), w_half))
+			r1.DstY = h - float32(viewport_transform(float(r1.DstY), h_half))
+			r1.ColorR = float32(t.v1.rgba.X() * inv_w1)
+			r1.ColorG = float32(t.v1.rgba.Y() * inv_w1)
+			r1.ColorB = float32(t.v1.rgba.Z() * inv_w1)
+			r1.ColorA = float32(t.v1.rgba.W() * inv_w1)
+			r1.Custom3 = float32(inv_w1)
 
-			r2.DstX = viewport_transform(r2.DstX, w_half)
-			r2.DstY = viewport_transform(r2.DstY, h_half)
-			r2.ColorR = t.v2.rgba.X()
-			r2.ColorG = t.v2.rgba.Y()
-			r2.ColorB = t.v2.rgba.Z()
-			r2.ColorA = t.v2.rgba.W()
-			r2.Custom3 = inv_w2
+			r2.DstX = float32(viewport_transform(float(r2.DstX), w_half))
+			r2.DstY = h - float32(viewport_transform(float(r2.DstY), h_half))
+			r2.ColorR = float32(t.v2.rgba.X() * inv_w2)
+			r2.ColorG = float32(t.v2.rgba.Y() * inv_w2)
+			r2.ColorB = float32(t.v2.rgba.Z() * inv_w2)
+			r2.ColorA = float32(t.v2.rgba.W() * inv_w2)
+			r2.Custom3 = float32(inv_w2)
 
-			r3.DstX = viewport_transform(r3.DstX, w_half)
-			r3.DstY = viewport_transform(r3.DstY, h_half)
-			r3.ColorR = t.v3.rgba.X()
-			r3.ColorG = t.v3.rgba.Y()
-			r3.ColorB = t.v3.rgba.Z()
-			r3.ColorA = t.v3.rgba.W()
-			r3.Custom3 = inv_w3
+			r3.DstX = float32(viewport_transform(float(r3.DstX), w_half))
+			r3.DstY = h - float32(viewport_transform(float(r3.DstY), h_half))
+			r3.ColorR = float32(t.v3.rgba.X() * inv_w3)
+			r3.ColorG = float32(t.v3.rgba.Y() * inv_w3)
+			r3.ColorB = float32(t.v3.rgba.Z() * inv_w3)
+			r3.ColorA = float32(t.v3.rgba.W() * inv_w3)
+			r3.Custom3 = float32(inv_w3)
 
 			// perspective correction
 			if true {
-				r1.SrcX = v1.uv.X() * inv_w1
-				r1.SrcY = v1.uv.Y() * inv_w1
-
-				r2.SrcX = v2.uv.X() * inv_w2
-				r2.SrcY = v2.uv.Y() * inv_w2
-
-				r3.SrcX = v3.uv.X() * inv_w3
-				r3.SrcY = v3.uv.Y() * inv_w3
+				r1.SrcX = float32(v1.uv.X() * inv_w1)
+				r1.SrcY = float32(v1.uv.Y() * inv_w1)
+				r2.SrcX = float32(v2.uv.X() * inv_w2)
+				r2.SrcY = float32(v2.uv.Y() * inv_w2)
+				r3.SrcX = float32(v3.uv.X() * inv_w3)
+				r3.SrcY = float32(v3.uv.Y() * inv_w3)
 			} else {
-				r1.SrcX = v1.uv.X()
-				r1.SrcY = v1.uv.Y()
-				r2.SrcX = v2.uv.X()
-				r2.SrcY = v2.uv.Y()
-				r3.SrcX = v3.uv.X()
-				r3.SrcY = v3.uv.Y()
+				r1.SrcX = float32(v1.uv.X())
+				r1.SrcY = float32(v1.uv.Y())
+				r2.SrcX = float32(v2.uv.X())
+				r2.SrcY = float32(v2.uv.Y())
+				r3.SrcX = float32(v3.uv.X())
+				r3.SrcY = float32(v3.uv.Y())
 			}
 
 			ctx.vertices = append(ctx.vertices, r1, r2, r3)
@@ -595,24 +603,16 @@ func (g *game) Draw(screen *ebiten.Image) {
 	// https://www.songho.ca/opengl/gl_projectionmatrix.html#perspective
 	// ctx.set_orthographic(-eye_distance*game_aspect, eye_distance*game_aspect, eye_distance, -eye_distance, 0.1, 10)
 
-	ctx.proj_matrix = mgl32.Perspective(30, game_aspect, 0.1, 100)
+	ctx.proj_matrix = mgl.Perspective(math.Pi/2, game_aspect, 1, 1000)
 
 	// the camera view matrix is invalid until the user controls it
-	if g.camera.view_matrix.Det() == 0 {
-		ctx.view_matrix = mgl32.LookAtV(
-			vec3{0, 7, 19},
-			vec3{0, 0, 0},
-			vec3{0, 1, 0},
-		)
-	} else {
-		ctx.view_matrix = g.camera.view_matrix
-	}
+	ctx.view_matrix = g.camera.view_matrix
 
 	screen.Fill(color.RGBA{130, 130, 130, 255})
 
 	position := vec3{0, 0, 0}
 
-	orientation := mgl32.QuatIdent()
+	orientation := mgl.QuatIdent()
 	// angle := g.cycle / 60 / math.Pi
 	// orientation = orientation.Mul(mgl32.QuatRotate(angle, vec3{0, 1, 0}))
 
